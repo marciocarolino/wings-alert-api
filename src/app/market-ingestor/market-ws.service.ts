@@ -14,26 +14,26 @@ type KlineMsg = {
   stream?: string;
   data?: {
     e: 'kline';
-    E: number; // event time
-    s: string; // symbol
+    E: number;
+    s: string;
     k: {
-      t: number; // open time
-      T: number; // close time
-      s: string; // symbol
-      i: string; // interval
-      f: number; // first trade id
-      L: number; // last trade id
-      o: string; // open
-      c: string; // close
-      h: string; // high
-      l: string; // low
-      v: string; // base asset volume
-      n: number; // number of trades
-      x: boolean; // is this kline closed?
-      q: string; // quote asset volume
-      V: string; // taker buy base asset volume
-      Q: string; // taker buy quote asset volume
-      B: string; // ignore
+      t: number;
+      T: number;
+      s: string;
+      i: string;
+      f: number;
+      L: number;
+      o: string;
+      c: string;
+      h: string;
+      l: string;
+      v: string;
+      n: number;
+      x: boolean;
+      q: string;
+      V: string;
+      Q: string;
+      B: string;
     };
   };
 };
@@ -42,7 +42,7 @@ type KlineMsg = {
 export class MarketWsService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(MarketWsService.name);
   private ws?: WebSocket;
-  private backoffMs = 1000; // começa com 1s
+  private backoffMs = 1000;
   private reconnectTimer?: NodeJS.Timeout;
   private inactivityTimer?: NodeJS.Timeout;
   private lastMsgAt = 0;
@@ -59,30 +59,70 @@ export class MarketWsService implements OnModuleInit, OnModuleDestroy {
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean);
-
     this.interval = (this.cfg.get<string>('KLINE_INTERVAL') ?? '1m').trim();
     this.baseWs =
       this.cfg.get<string>('BINANCE_WS_BASE') ??
       'wss://stream.binance.com:9443';
   }
 
+  // ---------- lifecycle ----------
   onModuleInit() {
     if (!this.symbols.length) {
       this.log.warn(
-        'Nenhum símbolo configurado em SYMBOLS. Abortando conexão WS.',
+        'Nenhum símbolo configurado. Ajuste em runtime via /market/symbols.',
       );
       return;
     }
     this.connect();
   }
-
   onModuleDestroy() {
     this.cleanup('shutdown');
   }
 
-  // --- conexão ---
+  // ---------- getters/setters públicos ----------
+  getSymbols() {
+    return [...this.symbols];
+  }
+  getInterval() {
+    return this.interval;
+  }
 
+  /** Substitui completamente a lista de símbolos e (opcional) o intervalo. */
+  setConfig({ symbols, interval }: { symbols?: string[]; interval?: string }) {
+    const nextSymbols = symbols ? this.normalize(symbols) : this.symbols;
+    const nextInterval = interval ? interval.trim() : this.interval;
+
+    const changed =
+      nextInterval !== this.interval ||
+      nextSymbols.length !== this.symbols.length ||
+      nextSymbols.some((s, i) => s !== this.symbols[i]);
+
+    this.symbols = nextSymbols;
+    this.interval = nextInterval;
+
+    if (changed) this.reconnectNow('reconfigure');
+    return { symbols: this.getSymbols(), interval: this.interval };
+  }
+
+  addSymbols(toAdd: string[]) {
+    const add = this.normalize(toAdd);
+    const set = new Set(this.symbols.concat(add));
+    const merged = [...set];
+    return this.setConfig({ symbols: merged });
+  }
+
+  removeSymbol(symbol: string) {
+    const s = symbol.trim().toLowerCase();
+    const filtered = this.symbols.filter((x) => x !== s);
+    return this.setConfig({ symbols: filtered });
+  }
+
+  // ---------- conexão WS ----------
   private connect() {
+    if (!this.symbols.length) {
+      this.log.warn('Sem símbolos para assinar — WS não será aberto.');
+      return;
+    }
     const streams = this.symbols
       .map((s) => `${s}@kline_${this.interval}`)
       .join('/');
@@ -95,16 +135,15 @@ export class MarketWsService implements OnModuleInit, OnModuleDestroy {
       this.log.log(
         `WS aberto (${this.symbols.length} símbolos / ${this.interval}).`,
       );
-      this.backoffMs = 1000; // reset backoff
+      this.backoffMs = 1000;
       this.bumpInactivityWatch();
     });
 
-    this.ws.on('message', (data) => this.onMessage(data));
+    this.ws.on('message', (data: RawData) => this.onMessage(data));
     this.ws.on('error', (err) => {
       this.log.warn(`WS erro: ${String(err)}`);
       this.scheduleReconnect();
     });
-
     this.ws.on('close', (code, reason) => {
       this.log.warn(`WS fechado (${code}) ${reason?.toString() ?? ''}`.trim());
       this.scheduleReconnect();
@@ -118,7 +157,6 @@ export class MarketWsService implements OnModuleInit, OnModuleDestroy {
     try {
       const msg = JSON.parse(data.toString()) as KlineMsg;
       if (msg?.data?.e !== 'kline') return;
-
       const k = msg.data.k;
       const payload = {
         symbol: k.s,
@@ -132,48 +170,45 @@ export class MarketWsService implements OnModuleInit, OnModuleDestroy {
         openTime: k.t,
         closeTime: k.T,
       };
-
-      // Emite um evento por intervalo (ex.: "market.kline.1m")
       this.events.emit(`market.kline.${this.interval}`, payload);
-
-      // Se quiser ouvir TUDO num só canal:
       this.events.emit('market.kline', payload);
-
-      // Log opcional apenas quando fechar candle (reduz ruído)
-      if (k.x) {
+      if (k.x)
         this.log.debug(
           `[${payload.symbol}] ${this.interval} close=${payload.close} vol=${payload.volume}`,
         );
-      }
     } catch (e) {
       this.log.warn(`Falha ao parsear mensagem WS: ${(e as Error).message}`);
     }
   }
 
-  // --- resiliência ---
-
+  // ---------- resiliência ----------
   private scheduleReconnect() {
     this.clearInactivityWatch();
-    if (this.reconnectTimer) return; // já agendado
+    if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       this.cleanup('reconnect');
-      this.backoffMs = Math.min(this.backoffMs * 2, 30_000); // até 30s
+      this.backoffMs = Math.min(this.backoffMs * 2, 30_000);
       this.log.warn(`Reconectando WS (backoff atual: ${this.backoffMs}ms)…`);
       this.connect();
     }, this.backoffMs);
   }
 
+  private reconnectNow(reason: 'reconfigure') {
+    this.clearInactivityWatch();
+    this.cleanup(reason);
+    this.backoffMs = 1000; // sem penalidade na reconfiguração
+    this.connect();
+  }
+
   private bumpInactivityWatch() {
     this.clearInactivityWatch();
-    // se ficar 30s sem mensagens, força reconectar
     this.inactivityTimer = setTimeout(() => {
       const delta = Date.now() - this.lastMsgAt;
       this.log.warn(`Sem mensagens há ${delta}ms. Reconectando…`);
       this.scheduleReconnect();
     }, 30_000);
   }
-
   private clearInactivityWatch() {
     if (this.inactivityTimer) {
       clearTimeout(this.inactivityTimer);
@@ -181,18 +216,27 @@ export class MarketWsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private cleanup(reason: 'reconnect' | 'shutdown') {
-    this.clearInactivityWatch();
+  private cleanup(reason: 'reconnect' | 'shutdown' | 'reconfigure') {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
         this.ws.close(1000, reason);
       } catch (error) {
-        this.log.error(error);
+        this.log.error(`Error ${error}`);
       }
     }
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws = undefined;
     }
+  }
+
+  private normalize(list: string[]) {
+    return [
+      ...new Set(
+        list
+          .map((s) => s.trim().toLowerCase())
+          .filter((s) => /^[a-z0-9]{5,15}$/.test(s)), // formato simples, ex: btcusdt
+      ),
+    ].sort();
   }
 }
