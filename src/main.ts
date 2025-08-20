@@ -10,6 +10,7 @@ async function bootstrap() {
     logger: ['error', 'warn', 'log', 'debug'], // opcional
   });
 
+  app.enableShutdownHooks();
   app.enableCors();
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 

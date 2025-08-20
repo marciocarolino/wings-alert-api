@@ -1,0 +1,64 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String   // hash bcrypt
+  role      Role     @default(USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rules     Rule[]
+  channels  Channel[]
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model Rule {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  symbol        String
+  windowMin     Int
+  thresholdPct  Float
+  cooldownSec   Int       @default(120)
+  enabled       Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([enabled, symbol])
+}
+
+model Channel {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      ChannelType
+  // Apenas um dos campos abaixo será usado conforme o tipo
+  telegramChatId String?
+  email          String?
+  discordWebhook String?
+
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+enum ChannelType {
+  TELEGRAM
+  EMAIL
+  DISCORD
+}
