@@ -15,7 +15,14 @@ export class AuthService {
   ) {}
 
   async signup(email: string, password: string) {
+    const existsUser = await this.prisma.user.findUnique({
+      where: { email: email },
+    });
+
+    if (existsUser) throw new UnauthorizedException('Cliente já cadastrado');
+
     const hash = await bcrypt.hash(password, 10);
+
     const user = await this.prisma.user.create({
       data: { email, password: hash },
     });
